@@ -276,29 +276,39 @@ bool tap_config(const char* ifname)
   return success;
 }
 
-void setup_ue_ipv4_route(const char* ifname, int instance_id, int pdu_session_id, const char *ipv4)
+/* Isolates UE PDU session traffic in a dedicated routing table to prevent asymmetric routing and rp_filter drops. */
+bool setup_ue_ipv4_route(const char *ifname, int instance_id, int pdu_session_id, const char *ipv4)
 {
   /* This needs to be unique per (instance_id, pdu_session_id) */
   // UE0, PDU1 = 10001, UE1, PDU1 = 10101, UE15, PDU15 = 11515 ...
   int table_id = 10000 + instance_id * 100 + pdu_session_id;
 
   char command_line[500];
-  int res = sprintf(command_line,
-                    "ip rule add from %s/32 table %d && "
-                    "ip rule add to %s/32 table %d && "
-                    "ip route add default dev %s table %d",
-                    ipv4,
-                    table_id,
-                    ipv4,
-                    table_id,
-                    ifname,
-                    table_id);
+  int res = snprintf(command_line,
+                     sizeof(command_line),
+                     "ip rule add from %s/32 table %d && ip rule add to %s/32 table %d && ip route add default dev %s table %d",
+                     ipv4,
+                     table_id,
+                     ipv4,
+                     table_id,
+                     ifname,
+                     table_id);
 
-  if (res < 0) {
+  if (res < 0 || (size_t)res >= sizeof(command_line)) {
     LOG_E(UTIL, "Could not create ip rule/route commands string\n");
-    return;
+    return false;
   }
-  background_system(command_line);
+
+  /* Verify that the background worker succeeded so missing iproute2 or stale rules
+   * do not silently leave the UE data path unrouted. */
+  if (background_system(command_line) != 0) {
+    LOG_E(UTIL,
+          "UE IPv4 route setup failed: \"%s\". Check iproute2 is installed and no stale rules exist; traffic will not use %s.\n",
+          command_line,
+          ifname);
+    return false;
+  }
+  return true;
 }
 
 int tun_generate_ifname(char *ifname, const char *ifprefix, int instance_id)
